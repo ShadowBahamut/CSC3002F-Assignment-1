@@ -341,11 +341,12 @@ class Database:
                     "INSERT INTO sessions (token, user_id, ip_address, udp_port) VALUES (?, ?, ?, ?)",
                     (token, user_id, ip_address, udp_port)
                 )
+                # Fetch username using the same connection to avoid re-acquiring
+                # self.lock (which is non-reentrant and would deadlock).
+                cursor.execute("SELECT username FROM users WHERE id = ?", (user_id,))
+                user_row = cursor.fetchone()
+                username = user_row['username'] if user_row else "unknown"
                 conn.commit()
-
-            # Get username for the session object
-            user = self.get_user_by_id(user_id)
-            username = user.username if user else "unknown"
 
             return Session(
                 token=token,
@@ -385,9 +386,12 @@ class Database:
                         udp_port=row['udp_port'],
                         last_active=datetime.fromisoformat(row['last_active'])
                     )
-                    # Check if session is expired
+                    # Check if session is expired. Delete inline using the
+                    # existing connection to avoid re-acquiring self.lock
+                    # (non-reentrant) which would deadlock.
                     if session.is_expired():
-                        self.delete_session(token)
+                        cursor.execute("DELETE FROM sessions WHERE token = ?", (token,))
+                        conn.commit()
                         return None
                     return session
                 return None

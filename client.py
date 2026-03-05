@@ -68,8 +68,8 @@ class ChatClient:
         self.running = False
         self.lock = threading.Lock()
 
-        # Message callbacks for incoming messages
-        self.message_callbacks: Dict[str, callable] = {}
+        import queue
+        self.response_queue: queue.Queue = queue.Queue()
 
         logger.info(f"ChatClient initialized for {host}:{port}")
 
@@ -110,24 +110,28 @@ class ChatClient:
         """
         Send a message and wait for response.
 
-        Args:
-            message: Message to send
-
-        Returns:
-            Response message or None on error
+        If the background listener thread is active, responses arrive via
+        response_queue (avoiding a race between the listener and this call).
+        Before the listener starts (pre-login), we read the response directly.
         """
         if not self.socket:
             logger.error("Not connected to server")
             return None
 
         try:
-            # Send message
             self.protocol.send_message(self.socket, message)
 
-            # Receive response
-            response = self.protocol.receive_message_buffered(self.socket)
-
-            return response
+            if self.running:
+                # Listener thread is active — wait on the queue
+                import queue as _queue
+                try:
+                    return self.response_queue.get(timeout=5.0)
+                except _queue.Empty:
+                    logger.error("Request timed out")
+                    return None
+            else:
+                # No listener yet — read directly from socket
+                return self.protocol.receive_message_buffered(self.socket)
 
         except socket.timeout:
             logger.error("Request timed out")
@@ -473,7 +477,11 @@ class ChatClient:
 
                 try:
                     message = self.protocol.receive_message_buffered(self.socket)
-                    self._handle_incoming_message(message)
+                    # CTRL messages are responses to commands — route to queue
+                    if message.category == MessageCategory.CTRL:
+                        self.response_queue.put(message)
+                    else:
+                        self._handle_incoming_message(message)
                 except socket.timeout:
                     continue
 
@@ -556,6 +564,10 @@ class ChatClient:
                     if len(parts) != 3:
                         print("Usage: register <username> <password>")
                     else:
+                        if not self.socket:
+                            if not self.connect():
+                                print("Failed to connect to server")
+                                continue
                         success, msg = self.register(parts[1], parts[2])
                         print(msg)
 
@@ -563,9 +575,10 @@ class ChatClient:
                     if len(parts) != 3:
                         print("Usage: login <username> <password>")
                     else:
-                        if not self.connect():
-                            print("Failed to connect to server")
-                            continue
+                        if not self.socket:
+                            if not self.connect():
+                                print("Failed to connect to server")
+                                continue
 
                         success, msg, token = self.login(parts[1], parts[2])
                         print(msg)

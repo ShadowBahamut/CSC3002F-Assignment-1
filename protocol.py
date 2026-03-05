@@ -452,18 +452,27 @@ class ProtocolHandler:
         Returns:
             Received message
         """
-        # Receive data in chunks
-        data = b""
         while True:
+            # Check if there is already a complete message in the buffer
+            # before blocking on recv. This handles the case where two
+            # messages arrived in one chunk from a previous recv call.
+            if self.parser.buffer:
+                message, remaining = self.parser.parse(b"")
+                if message:
+                    self.parser.buffer = remaining
+                    return message
+
+            # Need more data from the socket
             chunk = sock.recv(4096)
             if not chunk:
                 raise ProtocolError(400, "Connection closed")
-            data += chunk
 
-            # Try to parse
-            message, remaining = self.parser.parse(data)
+            # Pass each chunk individually to the parser so it accumulates
+            # data in self.parser.buffer only once (the old code also kept a
+            # local `data` variable that grew with each iteration, causing the
+            # same bytes to be added to self.parser.buffer twice).
+            message, remaining = self.parser.parse(chunk)
             if message:
-                # Store remaining for next message
                 self.parser.buffer = remaining
                 return message
 

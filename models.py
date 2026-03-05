@@ -9,7 +9,7 @@ Date: 2026-03-03
 """
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Optional, Dict, List, Any
 import uuid
@@ -206,12 +206,12 @@ class Session:
     username: str
     ip_address: str
     udp_port: Optional[int] = None
-    last_active: datetime = field(default_factory=datetime.now)
+    last_active: datetime = field(default_factory=lambda: datetime.now(timezone.utc).replace(tzinfo=None))
     client_socket: Any = None
 
     def update_activity(self) -> None:
         """Update the last active timestamp."""
-        self.last_active = datetime.now()
+        self.last_active = datetime.now(timezone.utc).replace(tzinfo=None)
 
     def is_expired(self, timeout_seconds: int = 60) -> bool:
         """
@@ -223,7 +223,7 @@ class Session:
         Returns:
             True if session is expired
         """
-        elapsed = (datetime.now() - self.last_active).total_seconds()
+        elapsed = (datetime.now(timezone.utc).replace(tzinfo=None) - self.last_active).total_seconds()
         return elapsed > timeout_seconds
 
     def __str__(self) -> str:

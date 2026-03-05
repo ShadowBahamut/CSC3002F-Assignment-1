@@ -180,8 +180,11 @@ class ChatServer:
                         if session.is_expired(self.SESSION_TIMEOUT):
                             expired.append(token)
 
-                    for token in expired:
-                        self._remove_session(token)
+                # Call _remove_session outside the lock: it acquires self.lock
+                # internally, and threading.Lock is non-reentrant, so calling
+                # it while already holding the lock would deadlock.
+                for token in expired:
+                    self._remove_session(token)
 
                 if expired:
                     logger.info(f"Cleaned up {len(expired)} expired sessions")
@@ -243,6 +246,20 @@ class ChatServer:
                     response = self._route_message(
                         message, current_session, client_socket, client_address
                     )
+
+                    # If this was a successful LOGIN, bind the session to this thread
+                    if (message.type == MessageType.LOGIN and
+                            response and response.type == MessageType.OK):
+                        session_token = response.get_header('Session-Token')
+                        with self.lock:
+                            current_session = self.active_sessions.get(session_token)
+
+                    # If this was a successful LOGOUT, clear the session so
+                    # the client can no longer issue authenticated commands on
+                    # this connection without logging in again.
+                    elif (message.type == MessageType.LOGOUT and
+                            response and response.type == MessageType.OK):
+                        current_session = None
 
                     # Send response if there's one
                     if response:
@@ -523,7 +540,18 @@ class ChatServer:
             )
 
         username = current_session.username
-        self._remove_session(current_session.token)
+
+        # Remove session data without closing the socket. _remove_session
+        # closes the socket, which would prevent the OK response from being
+        # sent back to the client. The socket will be closed naturally when
+        # _handle_client's finally block runs after current_session is set
+        # to None (handled in _handle_client after this returns OK).
+        with self.lock:
+            if current_session.token in self.active_sessions:
+                del self.active_sessions[current_session.token]
+            if username in self.active_clients:
+                del self.active_clients[username]
+        self.db.delete_session(current_session.token)
 
         logger.info(f"User logged out: {username}")
 
@@ -761,6 +789,7 @@ class ChatServer:
             if member != current_session.username:  # Don't send to self
                 self._forward_message(
                     from_user=current_session.username,
+                    to_user=member,
                     group=group_name,
                     text=text
                 )
@@ -871,10 +900,13 @@ class ChatServer:
         Returns:
             OK message
         """
+        headers = {'In-Reply-To': in_reply_to}
+        if extra_headers:
+            headers.update(extra_headers)
         return Message(
             category=MessageCategory.CTRL,
             type=MessageType.OK,
-            headers={'In-Reply-To': in_reply_to}
+            headers=headers
         )
 
     def _create_error_response(self, code: ErrorCode, reason: str,
