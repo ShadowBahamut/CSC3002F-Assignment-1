@@ -36,6 +36,7 @@ class Database:
     def __init__(self, db_path: str = "chat.db"):
         """
         Initialize the database connection.
+        
 
         Args:
             db_path: Path to the SQLite database file
@@ -836,3 +837,4 @@ class Database:
 
 # Global database instance
 db = Database()
+
