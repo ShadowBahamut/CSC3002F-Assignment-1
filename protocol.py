@@ -525,3 +525,4 @@ def parse_message_id(message: Message) -> str:
         import uuid
         msg_id = str(uuid.uuid4())
     return msg_id
+
