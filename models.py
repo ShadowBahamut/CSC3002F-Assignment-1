@@ -66,6 +66,8 @@ class MessageType(Enum):
     SEND_GROUP_TEXT = "SEND_GROUP_TEXT"
     LIST_GROUPS = "LIST_GROUPS"
     LIST_USERS = "LIST_USERS"
+    GET_USER_INFO = "GET_USER_INFO"
+
 
     # Control types
     OK = "OK"
