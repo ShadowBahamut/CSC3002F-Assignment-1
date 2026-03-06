@@ -15,6 +15,8 @@ import threading
 import sys
 import logging
 import shlex
+import os
+import time
 from typing import Optional, Dict
 from datetime import datetime
 
@@ -68,6 +70,12 @@ class ChatClient:
         self.running = False
         self.lock = threading.Lock()
 
+        # UDP for P2P file transfers
+        self.udp_socket: Optional[socket.socket] = None
+        self.udp_port: Optional[int] = None
+        self.udp_running = False
+        self.file_transfers: Dict[str, dict] = {}
+
         import queue
         self.response_queue: queue.Queue = queue.Queue()
 
@@ -104,7 +112,216 @@ class ChatClient:
         self.session_token = None
         self.username = None
 
+        # Clean up UDP resources
+        self.udp_running = False
+        if self.udp_socket:
+            try:
+                self.udp_socket.close()
+            except Exception:
+                pass
+        self.udp_socket = None
+        self.udp_port = None
+        self.file_transfers.clear()
+
         logger.info("Disconnected from server")
+
+    def _init_udp(self) -> bool:
+        """
+        Initialize UDP socket for P2P file transfers.
+
+        Returns:
+            True if UDP socket initialized successfully
+        """
+        try:
+            self.udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            self.udp_socket.bind(('0.0.0.0', 0))
+            self.udp_socket.settimeout(1.0)
+            self.udp_port = self.udp_socket.getsockname()[1]
+            self.udp_running = True
+            threading.Thread(target=self._udp_listener, daemon=True).start()
+            logger.info(f"UDP socket initialized on port {self.udp_port}")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to initialize UDP socket: {e}")
+            return False
+
+    def _udp_listener(self) -> None:
+        """
+        Listen for incoming UDP packets (file chunks) in a daemon thread.
+        """
+        # Bug fix: use self.udp_running (not self.running which controls TCP)
+        while self.udp_socket and self.udp_running:
+            try:
+                data, addr = self.udp_socket.recvfrom(65536)
+                self._handle_udp_packet(data, addr)
+            except socket.timeout:
+                continue
+            except Exception as e:
+                if self.udp_running:
+                    logger.error(f"UDP listener error: {e}")
+                break
+
+    def _handle_udp_packet(self, data: bytes, addr: tuple) -> None:
+        """
+        Handle an incoming UDP file-chunk packet.
+
+        Packet format: transfer_id:chunk_num:total_chunks:filename:<base64 data>
+        """
+        try:
+            parts = data.split(b':', 4)
+            if len(parts) != 5:
+                logger.error("Invalid UDP packet format")
+                return
+
+            import base64
+            transfer_id  = parts[0].decode('utf-8')
+            chunk_num    = int(parts[1].decode('utf-8'))
+            total_chunks = int(parts[2].decode('utf-8'))
+            filename     = parts[3].decode('utf-8')
+            chunk_data   = base64.b64decode(parts[4])
+
+            with self.lock:
+                if transfer_id not in self.file_transfers:
+                    self.file_transfers[transfer_id] = {
+                        'filename': f"received_{filename}",
+                        'chunks': {},
+                        'total_chunks': total_chunks,
+                        'sender_addr': addr
+                    }
+                transfer = self.file_transfers[transfer_id]
+                transfer['chunks'][chunk_num] = chunk_data
+                # Bug fix: \r not /r, and add spaces in format string
+                print(f"\rReceiving {transfer['filename']}: "
+                      f"{len(transfer['chunks'])}/{total_chunks} chunks", end="")
+
+                if len(transfer['chunks']) == total_chunks:
+                    print()
+                    self._assemble_file(transfer_id)
+
+        except Exception as e:
+            logger.error(f"Error handling UDP packet: {e}")
+
+    def _assemble_file(self, transfer_id: str) -> None:
+        """
+        Assemble received chunks into a complete file and clean up state.
+        """
+        transfer = self.file_transfers[transfer_id]
+        filename = transfer['filename']
+        try:
+            with open(filename, 'wb') as f:
+                for i in range(transfer['total_chunks']):
+                    if i in transfer['chunks']:
+                        f.write(transfer['chunks'][i])
+                    else:
+                        logger.error(f"Missing chunk {i} for transfer {transfer_id}")
+                        return
+            print(f"File received: {filename}")
+            logger.info(f"File transfer {transfer_id} completed: {filename}")
+        except Exception as e:
+            logger.error(f"Error assembling file {filename}: {e}")
+        finally:
+            del self.file_transfers[transfer_id]
+
+    def send_file(self, recipient: str, filepath: str) -> bool:
+        """
+        Send a file to another user via UDP P2P.
+
+        Looks up the recipient's UDP endpoint via GET_USER_INFO, then
+        sends the file in base64-encoded chunks.
+
+        Args:
+            recipient: Recipient username
+            filepath: Path to the file to send
+
+        Returns:
+            True if file sent successfully
+        """
+        if not os.path.exists(filepath):
+            print(f"File not found: {filepath}")
+            return False
+        if not self.udp_socket:
+            print("UDP not initialized — please login first")
+            return False
+
+        # Look up recipient's UDP endpoint from the server
+        user_info = self._get_user_info(recipient)
+        if not user_info:
+            print(f"Could not find UDP info for '{recipient}' — are they online?")
+            return False
+        recipient_ip, recipient_udp_port = user_info
+
+        try:
+            import uuid, math, base64
+            filename    = os.path.basename(filepath)
+            file_size   = os.path.getsize(filepath)
+            transfer_id = str(uuid.uuid4())
+            chunk_size  = 1000
+            total_chunks = math.ceil(file_size / chunk_size)
+
+            print(f"Sending {filename} ({file_size} bytes) to {recipient} "
+                  f"({recipient_ip}:{recipient_udp_port}) in {total_chunks} chunks")
+
+            with open(filepath, 'rb') as f:
+                for chunk_num in range(total_chunks):
+                    chunk = f.read(chunk_size)
+                    if not chunk:
+                        break
+                    header = f"{transfer_id}:{chunk_num}:{total_chunks}:{filename}:".encode()
+                    packet = header + base64.b64encode(chunk)
+                    self.udp_socket.sendto(packet, (recipient_ip, recipient_udp_port))
+                    print(f"\rSent {chunk_num + 1}/{total_chunks} chunks", end="")
+                    time.sleep(0.005)
+
+            print(f"\nFile '{filename}' sent successfully!")
+            return True
+
+        except Exception as e:
+            logger.error(f"Error sending file: {e}")
+            print(f"Failed to send file: {e}")
+            return False
+
+    def _get_user_info(self, username: str) -> Optional[tuple]:
+        """
+        Query the server for a user's IP and UDP port.
+
+        Returns:
+            (ip, udp_port) tuple or None if not found / not online
+        """
+        success, ip, udp_port = self.get_user_info(username)
+        if success and ip and udp_port:
+            return (ip, udp_port)
+        return None
+
+    def get_user_info(self, username: str) -> tuple:
+        """
+        Send a GET_USER_INFO command to the server.
+
+        Returns:
+            Tuple of (success, ip, udp_port)
+        """
+        if not self.session_token:
+            return False, None, None
+
+        message = Message(
+            category=MessageCategory.CMND,
+            type=MessageType.GET_USER_INFO
+        )
+        message.set_header('Session', self.session_token)
+        message.set_header('Username', username)
+
+        response = self.send_message(message)
+        if not response:
+            return False, None, None
+
+        if response.type == MessageType.OK:
+            ip = response.get_header('IP-Address')
+            udp_port_str = response.get_header('UDP-Port', '0')
+            try:
+                udp_port = int(udp_port_str) if udp_port_str != '0' else None
+                return True, ip, udp_port
+            except ValueError:
+                return False, None, None
+        return False, None, None
 
     def send_message(self, message: Message) -> Optional[Message]:
         """
@@ -180,12 +397,18 @@ class ChatClient:
         Returns:
             Tuple of (success, message, session_token)
         """
+        # Initialize UDP before login so we can advertise our UDP port
+        if not self.udp_socket:
+            if not self._init_udp():
+                return False, "Failed to initialize UDP socket", None
+
         message = Message(
             category=MessageCategory.CMND,
             type=MessageType.LOGIN
         )
         message.set_header('Username', username)
         message.set_header('Password', password)
+        message.set_header('UDP-Port', str(self.udp_port))
 
         response = self.send_message(message)
 
@@ -538,6 +761,7 @@ class ChatClient:
         print("  leave-group <name>              - Leave a group")
         print("  msg <user> <message>           - Send private message")
         print("  group-msg <group> <message>    - Send group message")
+        print("  send-file <user> <filepath>     - Send file to user via UDP")
         print("  list-users                      - List all users")
         print("  list-groups                     - List all groups")
         print("  help                            - Show this help")
@@ -634,6 +858,14 @@ class ChatClient:
                         success, msg = self.send_group_text(group, text)
                         print(msg)
 
+                elif cmd == "send-file":
+                    if len(parts) < 3:
+                        print("Usage: send-file <user> <filepath>")
+                    else:
+                        recipient = parts[1]
+                        filepath = ' '.join(parts[2:])
+                        self.send_file(recipient, filepath)
+
                 elif cmd == "list-users":
                     success, result = self.list_users()
                     if success:
@@ -662,6 +894,7 @@ class ChatClient:
                     print("  leave-group <name>             - Leave a group")
                     print("  msg <user> <message>           - Send private message")
                     print("  group-msg <group> <message>    - Send group message")
+                    print("  send-file <user> <filepath>    - Send file to user via UDP")
                     print("  list-users                     - List all users")
                     print("  list-groups                    - List all groups")
                     print("  help                           - Show this help")
