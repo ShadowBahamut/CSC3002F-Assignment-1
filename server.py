@@ -392,6 +392,8 @@ class ChatServer:
             return self._handle_list_groups(current_session, msg_id)
         elif msg_type == MessageType.LIST_USERS:
             return self._handle_list_users(current_session, msg_id)
+        elif msg_type == MessageType.GET_USER_INFO:
+            return self._handle_get_user_info(message, current_session, msg_id)
         else:
             return self._create_error_response(
                 ErrorCode.BAD_REQUEST, f"Unknown command: {msg_type.value}", msg_id
@@ -840,6 +842,45 @@ class ChatServer:
         return self._create_ok_response(
             msg_id,
             extra_headers={'Users': user_list}
+        )
+
+    def _handle_get_user_info(self, message: Message, current_session: Session,
+                             msg_id: str) -> Message:
+        """
+        Handle request for user information.
+
+        Expected headers: Username
+        Expected body: None
+
+        Args:
+            message: Get user info message
+            current_session: Current session
+            msg_id: Message ID
+
+        Returns:
+            Response message with user info
+        """
+        username = message.get_header('Username')
+
+        if not username:
+            return self._create_error_response(
+                ErrorCode.BAD_REQUEST, "Username required", msg_id
+            )
+
+        # Look up user session
+        with self.lock:
+            for token, session in self.active_sessions.items():
+                if session.username == username:
+                    return self._create_ok_response(
+                        msg_id,
+                        extra_headers={
+                            'IP-Address': session.ip_address,
+                            'UDP-Port': str(session.udp_port) if session.udp_port else '0'
+                        }
+                    )
+
+        return self._create_error_response(
+            ErrorCode.NOT_FOUND, f"User {username} not found or not online", msg_id
         )
 
     # ==================== Message Forwarding ====================
