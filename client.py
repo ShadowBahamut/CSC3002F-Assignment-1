@@ -2,12 +2,12 @@
 """
 Chat Client module for the chat application.
 
-This module implements the TCP client that connects to the chat server,
+The module implements the TCP client that connects to the chat server,
 handles user authentication, and provides a command-line interface for
-sending and receiving messages (one-to-one and group chat).
+sending and receiving messages (one-to-one and group chat) as well as UDP one-to-one file transfers.
 
-Author: MiniMax Agent
-Date: 2026-03-03
+Author: Group 68 (Anson Vattakunnel, Daniel Yu, Reece Baker)
+Date: 03/06/26
 """
 
 import socket
@@ -41,7 +41,9 @@ class ChatClient:
     - One-to-one messaging
     - Group chat messaging
     - Group management (create, join, leave)
+    - One-to-one file transfers
     - Listing users and groups
+    - Help Page
 
     Attributes:
         host: Server host address
@@ -55,7 +57,7 @@ class ChatClient:
 
     def __init__(self, host: str = 'localhost', port: int = 8888):
         """
-        Initialize the chat client.
+        Initializes the chat client and setup client values.
 
         Args:
             host: Server host address
@@ -83,7 +85,7 @@ class ChatClient:
 
     def connect(self) -> bool:
         """
-        Connect to the chat server.
+        Connects to chat server.
 
         Returns:
             True if connection successful
@@ -100,7 +102,7 @@ class ChatClient:
 
     def disconnect(self) -> None:
         """
-        Disconnect from the server.
+        Disconnects from the server.
         """
         if self.socket:
             try:
@@ -112,7 +114,7 @@ class ChatClient:
         self.session_token = None
         self.username = None
 
-        # Clean up UDP resources
+        # Stops UDP listener and closes and cleans up UDP socket
         self.udp_running = False
         if self.udp_socket:
             try:
@@ -147,9 +149,8 @@ class ChatClient:
 
     def _udp_listener(self) -> None:
         """
-        Listen for incoming UDP packets (file chunks) in a daemon thread.
+        Listens for incoming UDP packets (file chunks) in a daemon thread.
         """
-        # Bug fix: use self.udp_running (not self.running which controls TCP)
         while self.udp_socket and self.udp_running:
             try:
                 data, addr = self.udp_socket.recvfrom(65536)
@@ -163,8 +164,7 @@ class ChatClient:
 
     def _handle_udp_packet(self, data: bytes, addr: tuple) -> None:
         """
-        Handle an incoming UDP file-chunk packet.
-
+        Handles one incoming UDP file-chunk packet.
         Packet format: transfer_id:chunk_num:total_chunks:filename:<base64 data>
         """
         try:
@@ -190,10 +190,10 @@ class ChatClient:
                     }
                 transfer = self.file_transfers[transfer_id]
                 transfer['chunks'][chunk_num] = chunk_data
-                # Bug fix: \r not /r, and add spaces in format string
+                #show progress
                 print(f"\rReceiving {transfer['filename']}: "
                       f"{len(transfer['chunks'])}/{total_chunks} chunks", end="")
-
+                #if all received, rebuild file
                 if len(transfer['chunks']) == total_chunks:
                     print()
                     self._assemble_file(transfer_id)
@@ -225,9 +225,8 @@ class ChatClient:
     def send_file(self, recipient: str, filepath: str) -> bool:
         """
         Send a file to another user via UDP P2P.
-
         Looks up the recipient's UDP endpoint via GET_USER_INFO, then
-        sends the file in base64-encoded chunks.
+        sends file in base64-encoded chunks.
 
         Args:
             recipient: Recipient username
@@ -243,7 +242,7 @@ class ChatClient:
             print("UDP not initialized — please login first")
             return False
 
-        # Look up recipient's UDP endpoint from the server
+        # Look up recipient's IP and UDP port from the server
         user_info = self._get_user_info(recipient)
         if not user_info:
             print(f"Could not find UDP info for '{recipient}' — are they online?")
@@ -328,7 +327,7 @@ class ChatClient:
         Send a message and wait for response.
 
         If the background listener thread is active, responses arrive via
-        response_queue (avoiding a race between the listener and this call).
+        response_queue (avoids a race condition between the listener and this call).
         Before the listener starts (pre-login), we read the response directly.
         """
         if not self.socket:
@@ -339,7 +338,7 @@ class ChatClient:
             self.protocol.send_message(self.socket, message)
 
             if self.running:
-                # Listener thread is active — wait on the queue
+                #listener thread active — wait on the queue
                 import queue as _queue
                 try:
                     return self.response_queue.get(timeout=5.0)
@@ -347,7 +346,7 @@ class ChatClient:
                     logger.error("Request timed out")
                     return None
             else:
-                # No listener yet — read directly from socket
+                #no listener yet — read directly from socket
                 return self.protocol.receive_message_buffered(self.socket)
 
         except socket.timeout:
@@ -359,7 +358,7 @@ class ChatClient:
 
     def register(self, username: str, password: str) -> tuple:
         """
-        Register a new user account.
+        Registers new user account.
 
         Args:
             username: Desired username
@@ -388,7 +387,7 @@ class ChatClient:
 
     def login(self, username: str, password: str) -> tuple:
         """
-        Login to the server.
+        Login to server.
 
         Args:
             username: Username
@@ -452,7 +451,7 @@ class ChatClient:
 
     def create_group(self, group_name: str) -> tuple:
         """
-        Create a new chat group.
+        Create new chat group.
 
         Args:
             group_name: Name for the new group
@@ -483,7 +482,7 @@ class ChatClient:
 
     def join_group(self, group_name: str) -> tuple:
         """
-        Join an existing chat group.
+        Join existing group chat.
 
         Args:
             group_name: Name of the group to join
@@ -514,10 +513,10 @@ class ChatClient:
 
     def leave_group(self, group_name: str) -> tuple:
         """
-        Leave a chat group.
+        Leave group chat.
 
         Args:
-            group_name: Name of the group to leave
+            group_name: Name of group to leave
 
         Returns:
             Tuple of (success, message)
@@ -545,7 +544,7 @@ class ChatClient:
 
     def send_text(self, recipient: str, text: str) -> tuple:
         """
-        Send a text message to a user.
+        Send text message to a user.
 
         Args:
             recipient: Recipient username
@@ -578,7 +577,7 @@ class ChatClient:
 
     def send_group_text(self, group_name: str, text: str) -> tuple:
         """
-        Send a text message to a group.
+        Send text message to a group.
 
         Args:
             group_name: Group name
@@ -611,7 +610,7 @@ class ChatClient:
 
     def list_groups(self) -> tuple:
         """
-        List all available groups.
+        List all groups.
 
         Returns:
             Tuple of (success, groups_list_or_error_message)
@@ -680,7 +679,7 @@ class ChatClient:
 
     def start_listening(self) -> None:
         """
-        Start listening for incoming messages in a separate thread.
+        Starts listening for incoming messages in a separate thread.
         """
         self.running = True
 
@@ -691,7 +690,7 @@ class ChatClient:
         """
         Listen for incoming messages from the server.
 
-        This runs in a separate daemon thread.
+        Runs in a separate daemon thread.
         """
         while self.running and self.socket:
             try:
@@ -717,7 +716,7 @@ class ChatClient:
 
     def _handle_incoming_message(self, message: Message) -> None:
         """
-        Handle an incoming message from the server.
+        Handles incoming message from server.
 
         Args:
             message: Received message
@@ -775,7 +774,7 @@ class ChatClient:
                 if not command:
                     continue
 
-                # Parse command
+                # Split commands safely
                 try:
                     parts = shlex.split(command)
                 except ValueError:
@@ -916,7 +915,7 @@ class ChatClient:
             except Exception as e:
                 print(f"Error: {e}")
 
-        # Clean up
+        # Clean up before exiting
         self.running = False
         if self.session_token:
             self.logout()

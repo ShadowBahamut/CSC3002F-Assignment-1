@@ -10,8 +10,8 @@ the specification:
     \n
     [Body]
 
-Author: MiniMax Agent
-Date: 2026-03-03
+Author: Group 68 (Anson Vattakunnel, Daniel Yu, Reece Baker)
+Date: 03/06/26
 """
 
 import socket
@@ -74,10 +74,10 @@ class MessageParser:
         """
         self.buffer += data
 
-        # Try to find the end of headers (blank line)
+        # Try find the end of headers (blank line)
         header_end = self.buffer.find(b'\n\n')
         if header_end == -1:
-            # Check if we have too much data without headers
+            # Check if too much data without headers
             if len(self.buffer) > self.MAX_HEADER_SIZE:
                 raise ProtocolError(400, "Header too large")
             return None, self.buffer
@@ -92,7 +92,7 @@ class MessageParser:
         except ValueError as e:
             raise ProtocolError(400, f"Invalid header format: {str(e)}")
 
-        # Check if we have the full body
+        # Check if we have full body
         content_length = int(message.get_header('Content-Length', '0'))
 
         if len(remaining) < content_length:
@@ -163,7 +163,7 @@ class MessageParser:
     def parse_from_socket(self, sock: socket.socket,
                          timeout: float = 5.0) -> Message:
         """
-        Read and parse a complete message from a socket.
+        Read and parse complete message from socket.
 
         This is a convenience method that handles socket reads until
         a complete message is received.
@@ -274,7 +274,7 @@ class MessageEncoder:
     def encode_error(code: ErrorCode, reason: str,
                     in_reply_to: str = "") -> bytes:
         """
-        Encode an error response message.
+        Encode  error response message.
 
         Args:
             code: Error code
@@ -298,7 +298,7 @@ class MessageEncoder:
     @staticmethod
     def encode_ok(in_reply_to: str = "", extra_headers: dict = None) -> bytes:
         """
-        Encode an OK response message.
+        Encode OK response message.
 
         Args:
             in_reply_to: Message ID being replied to
@@ -323,7 +323,7 @@ class MessageEncoder:
     def encode_text(from_user: str, to_user: str,
                    text: str, session: str = "") -> bytes:
         """
-        Encode a text message for routing.
+        Encode text message for routing.
 
         Args:
             from_user: Sender username
@@ -351,7 +351,7 @@ class MessageEncoder:
     def encode_group_text(from_user: str, group_name: str,
                          text: str, session: str = "") -> bytes:
         """
-        Encode a group text message for routing.
+        Encode group text message for routing.
 
         Args:
             from_user: Sender username
@@ -402,7 +402,7 @@ class ProtocolHandler:
     def send_error(self, sock: socket.socket, code: ErrorCode,
                   reason: str, in_reply_to: str = "") -> None:
         """
-        Send an error response.
+        Send error response.
 
         Args:
             sock: Socket to send on
@@ -416,7 +416,7 @@ class ProtocolHandler:
     def send_ok(self, sock: socket.socket, in_reply_to: str = "",
                extra_headers: dict = None) -> None:
         """
-        Send an OK response.
+        Send OK response.
 
         Args:
             sock: Socket to send on
@@ -429,7 +429,7 @@ class ProtocolHandler:
     def receive_message(self, sock: socket.socket,
                        timeout: float = 5.0) -> Message:
         """
-        Receive a message from a socket.
+        Receive message from a socket.
 
         Args:
             sock: Socket to receive from
@@ -442,7 +442,7 @@ class ProtocolHandler:
 
     def receive_message_buffered(self, sock: socket.socket) -> Message:
         """
-        Receive a message using buffered parsing.
+        Receive message using buffered parsing.
 
         Use this when data might arrive in multiple chunks.
 
@@ -462,7 +462,7 @@ class ProtocolHandler:
                     self.parser.buffer = remaining
                     return message
 
-            # Need more data from the socket
+            # Needs more data from the socket
             chunk = sock.recv(4096)
             if not chunk:
                 raise ProtocolError(400, "Connection closed")

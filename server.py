@@ -4,11 +4,11 @@ Chat Server module for the chat application.
 
 This module implements the TCP server that handles client connections,
 user authentication, message routing (one-to-one and group chat), and
-group management. It uses SQLite for data persistence and supports
-concurrent clients using threads.
+group management and support for UDP one-to-one file transfer coordination. 
+It uses SQLite for data persistence and supports concurrent clients using threads.
 
-Author: MiniMax Agent
-Date: 2026-03-03
+Author: Group 68 (Anson Vattakunnel, Daniel Yu, Reece Baker)
+Date: 03/06/26
 """
 
 import socket
@@ -56,14 +56,14 @@ class ChatServer:
     """
 
     # Server configuration
-    HOST = '0.0.0.0'  # Listen on all interfaces
-    PORT = 8888       # Default TCP port
-    MAX_CLIENTS = 100  # Maximum concurrent clients
-    SESSION_TIMEOUT = 60  # Session timeout in seconds
+    HOST = '0.0.0.0'    # Listen on all interfaces
+    PORT = 8888 # Default TCP port
+    MAX_CLIENTS = 100   # Maximum concurrent clients
+    SESSION_TIMEOUT = 600   # Session timeout in 600 seconds/10 min
 
     def __init__(self, host: str = None, port: int = None):
         """
-        Initialize the chat server.
+        Initialize chat server.
 
         Args:
             host: Server host address (default: 0.0.0.0)
@@ -223,9 +223,9 @@ class ChatServer:
     def _handle_client(self, client_socket: socket.socket,
                       client_address: tuple) -> None:
         """
-        Handle a client connection.
+        Handles client connection.
 
-        This method runs in a separate thread for each client. It reads
+        The method runs in a separate thread for each client. It reads
         messages from the client, processes them, and sends responses.
 
         Args:
@@ -261,7 +261,7 @@ class ChatServer:
                             response and response.type == MessageType.OK):
                         current_session = None
 
-                    # Send response if there's one
+                    # Send response if there  is one
                     if response:
                         protocol.send_message(client_socket, response)
 
