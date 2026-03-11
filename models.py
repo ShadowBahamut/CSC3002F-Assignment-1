@@ -5,7 +5,7 @@ This module defines core data structures used throughout the application,
 including messages, users, sessions, groups, and transfer states.
 
 Author: Group 68 (Anson Vattakunnel, Daniel Yu, Reece Baker)
-Date: 03/06/26
+Date: 13/03/26
 """
 
 from dataclasses import dataclass, field
@@ -66,7 +66,9 @@ class MessageType(Enum):
     SEND_GROUP_TEXT = "SEND_GROUP_TEXT"
     LIST_GROUPS = "LIST_GROUPS"
     LIST_USERS = "LIST_USERS"
+    LIST_GROUP_MEMBERS = "LIST_GROUP_MEMBERS"
     GET_USER_INFO = "GET_USER_INFO"
+    GET_GROUP_MEMBERS = "GET_GROUP_MEMBERS"
 
     # Control types
     OK = "OK"

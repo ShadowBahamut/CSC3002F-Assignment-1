@@ -6,7 +6,7 @@ and message history. It uses context managers for safe database connections
 and provides thread-safe operations.
 
 Author: Group 68 (Anson Vattakunnel, Daniel Yu, Reece Baker)
-Date: 03/06/26
+Date: 13/03/26
 """
 
 import sqlite3
