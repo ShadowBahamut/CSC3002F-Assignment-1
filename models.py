@@ -1,11 +1,11 @@
 """
 Models module for the chat application.
 
-This module defines the core data structures used throughout the application,
+This module defines core data structures used throughout the application,
 including messages, users, sessions, groups, and transfer states.
 
-Author: MiniMax Agent
-Date: 2026-03-03
+Author: Group 68 (Anson Vattakunnel, Daniel Yu, Reece Baker)
+Date: 13/03/26
 """
 
 from dataclasses import dataclass, field
@@ -66,7 +66,9 @@ class MessageType(Enum):
     SEND_GROUP_TEXT = "SEND_GROUP_TEXT"
     LIST_GROUPS = "LIST_GROUPS"
     LIST_USERS = "LIST_USERS"
+    LIST_GROUP_MEMBERS = "LIST_GROUP_MEMBERS"
     GET_USER_INFO = "GET_USER_INFO"
+    GET_GROUP_MEMBERS = "GET_GROUP_MEMBERS"
 
     # Control types
     OK = "OK"
@@ -126,7 +128,7 @@ class Message:
 
     def get_header(self, key: str, default: str = "") -> str:
         """
-        Get a header value with optional default.
+        Get header value with optional default.
 
         Args:
             key: Header name (case-insensitive)
@@ -144,7 +146,7 @@ class Message:
 
     def set_header(self, key: str, value: str) -> None:
         """
-        Set a header value.
+        Set header value.
 
         Args:
             key: Header name

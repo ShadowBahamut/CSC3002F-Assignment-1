@@ -2,12 +2,12 @@
 """
 Chat Client module for the chat application.
 
-This module implements the TCP client that connects to the chat server,
+The module implements the TCP client that connects to the chat server,
 handles user authentication, and provides a command-line interface for
-sending and receiving messages (one-to-one and group chat).
+sending and receiving messages (one-to-one and group chat) as well as UDP one-to-one and group file transfers.
 
-Author: MiniMax Agent
-Date: 2026-03-03
+Author: Group 68 (Anson Vattakunnel, Daniel Yu, Reece Baker)
+Date: 13/3/26
 """
 
 import socket
@@ -17,6 +17,7 @@ import logging
 import shlex
 import os
 import time
+import uuid
 from typing import Optional, Dict
 from datetime import datetime
 
@@ -41,7 +42,9 @@ class ChatClient:
     - One-to-one messaging
     - Group chat messaging
     - Group management (create, join, leave)
+    - One-to-one and group file transfers
     - Listing users and groups
+    - Help Page
 
     Attributes:
         host: Server host address
@@ -55,7 +58,7 @@ class ChatClient:
 
     def __init__(self, host: str = 'localhost', port: int = 8888):
         """
-        Initialize the chat client.
+        Initializes the chat client and setup client values.
 
         Args:
             host: Server host address
@@ -78,12 +81,14 @@ class ChatClient:
 
         import queue
         self.response_queue: queue.Queue = queue.Queue()
+        self.pending_lock = threading.Lock()
+        self.command_lock = threading.Lock()
 
         logger.info(f"ChatClient initialized for {host}:{port}")
 
     def connect(self) -> bool:
         """
-        Connect to the chat server.
+        Connects to chat server.
 
         Returns:
             True if connection successful
@@ -100,7 +105,7 @@ class ChatClient:
 
     def disconnect(self) -> None:
         """
-        Disconnect from the server.
+        Disconnects from the server.
         """
         if self.socket:
             try:
@@ -112,7 +117,7 @@ class ChatClient:
         self.session_token = None
         self.username = None
 
-        # Clean up UDP resources
+        # Stops UDP listener and closes and cleans up UDP socket
         self.udp_running = False
         if self.udp_socket:
             try:
@@ -147,9 +152,8 @@ class ChatClient:
 
     def _udp_listener(self) -> None:
         """
-        Listen for incoming UDP packets (file chunks) in a daemon thread.
+        Listens for incoming UDP packets (file chunks) in a daemon thread.
         """
-        # Bug fix: use self.udp_running (not self.running which controls TCP)
         while self.udp_socket and self.udp_running:
             try:
                 data, addr = self.udp_socket.recvfrom(65536)
@@ -163,36 +167,54 @@ class ChatClient:
 
     def _handle_udp_packet(self, data: bytes, addr: tuple) -> None:
         """
-        Handle an incoming UDP file-chunk packet.
+        Handles one incoming UDP file-transfer packet.
 
-        Packet format: transfer_id:chunk_num:total_chunks:filename:<base64 data>
+        Packet format:
+            FILE|transfer_id|sender|target_type|target_name|filename|chunk_num|total_chunks\\n
+            <raw binary chunk>
+
+        Method stores each received chunk in memory until all chunks for
+        the transfer have arrived, then reassembles the file.
+
+        Args:
+            data: Raw UDP packet bytes
+            addr: Sender UDP address tuple
+
+        Returns:
+            None
         """
         try:
-            parts = data.split(b':', 4)
-            if len(parts) != 5:
+            header_bytes, chunk_data = data.split(b'\n', 1)
+            header = header_bytes.decode('utf-8')
+            parts = header.split('|')
+
+            if len(parts) != 8 or parts[0] != "FILE":
                 logger.error("Invalid UDP packet format")
                 return
 
-            import base64
-            transfer_id  = parts[0].decode('utf-8')
-            chunk_num    = int(parts[1].decode('utf-8'))
-            total_chunks = int(parts[2].decode('utf-8'))
-            filename     = parts[3].decode('utf-8')
-            chunk_data   = base64.b64decode(parts[4])
+            _, transfer_id, sender, target_type, target_name, filename, chunk_num, total_chunks = parts
+            filename = os.path.basename(filename)
+            chunk_num = int(chunk_num)
+            total_chunks = int(total_chunks)
 
             with self.lock:
                 if transfer_id not in self.file_transfers:
+                    safe_name = f"received_{sender}_{transfer_id[:8]}_{filename}"
                     self.file_transfers[transfer_id] = {
-                        'filename': f"received_{filename}",
+                        'filename': safe_name,
                         'chunks': {},
                         'total_chunks': total_chunks,
-                        'sender_addr': addr
+                        'sender_addr': addr,
+                        'sender': sender,
+                        'target_type': target_type,
+                        'target_name': target_name,
                     }
+
                 transfer = self.file_transfers[transfer_id]
                 transfer['chunks'][chunk_num] = chunk_data
-                # Bug fix: \r not /r, and add spaces in format string
+
                 print(f"\rReceiving {transfer['filename']}: "
-                      f"{len(transfer['chunks'])}/{total_chunks} chunks", end="")
+                    f"{len(transfer['chunks'])}/{total_chunks} chunks", end="")
 
                 if len(transfer['chunks']) == total_chunks:
                     print()
@@ -200,6 +222,8 @@ class ChatClient:
 
         except Exception as e:
             logger.error(f"Error handling UDP packet: {e}")
+
+
 
     def _assemble_file(self, transfer_id: str) -> None:
         """
@@ -224,61 +248,166 @@ class ChatClient:
 
     def send_file(self, recipient: str, filepath: str) -> bool:
         """
-        Send a file to another user via UDP P2P.
+        Sends a file to another user via UDP P2P.
 
-        Looks up the recipient's UDP endpoint via GET_USER_INFO, then
-        sends the file in base64-encoded chunks.
+        Method looks up the recipient's UDP endpoint from the server
+        using GET_USER_INFO, then sends file to that endpoint in UDP
+        chunks using the shared file-transfer helper.
 
         Args:
             recipient: Recipient username
             filepath: Path to the file to send
 
         Returns:
-            True if file sent successfully
+            True if the file was sent successfully, False otherwise
         """
         if not os.path.exists(filepath):
             print(f"File not found: {filepath}")
             return False
+
         if not self.udp_socket:
             print("UDP not initialized — please login first")
             return False
 
-        # Look up recipient's UDP endpoint from the server
         user_info = self._get_user_info(recipient)
         if not user_info:
             print(f"Could not find UDP info for '{recipient}' — are they online?")
             return False
+
         recipient_ip, recipient_udp_port = user_info
 
-        try:
-            import uuid, math, base64
-            filename    = os.path.basename(filepath)
-            file_size   = os.path.getsize(filepath)
-            transfer_id = str(uuid.uuid4())
-            chunk_size  = 1000
-            total_chunks = math.ceil(file_size / chunk_size)
+        return self._send_file_to_endpoint(
+            recipient_name=recipient,
+            recipient_ip=recipient_ip,
+            recipient_udp_port=recipient_udp_port,
+            filepath=filepath,
+            target_type="USER",
+            target_name=recipient
+        )
+        
+    def _send_file_to_endpoint(self, recipient_name: str, recipient_ip: str,
+                           recipient_udp_port: int, filepath: str,
+                           target_type: str = "USER",
+                           target_name: str = "") -> bool:
+        """
+        Sends a file to specific UDP endpoint.
+        Helper is used by both one-to-one file transfer and group
+        file transfer. It reads file in chunks and sends each chunk
+        as a UDP datagram with a simple text header and raw binary payload.
 
-            print(f"Sending {filename} ({file_size} bytes) to {recipient} "
-                  f"({recipient_ip}:{recipient_udp_port}) in {total_chunks} chunks")
+        Args:
+            recipient_name: Username of the receiving user
+            recipient_ip: IP address of the receiving user
+            recipient_udp_port: UDP port of the receiving user
+            filepath: Path to the file to send
+            target_type: Transfer target type, e.g. USER or GROUP
+            target_name: Target username or group name
+
+        Returns:
+            True if the file was sent without a local socket/file error,
+            False otherwise
+        """
+        try:
+            import uuid
+            filename = os.path.basename(filepath)
+            file_size = os.path.getsize(filepath)
+            transfer_id = str(uuid.uuid4())
+
+            chunk_size = 1200
+            total_chunks = (file_size + chunk_size - 1) // chunk_size
+
+            print(f"Sending {filename} to {recipient_name} "
+                f"({recipient_ip}:{recipient_udp_port}) in {total_chunks} chunks")
 
             with open(filepath, 'rb') as f:
                 for chunk_num in range(total_chunks):
                     chunk = f.read(chunk_size)
                     if not chunk:
                         break
-                    header = f"{transfer_id}:{chunk_num}:{total_chunks}:{filename}:".encode()
-                    packet = header + base64.b64encode(chunk)
-                    self.udp_socket.sendto(packet, (recipient_ip, recipient_udp_port))
-                    print(f"\rSent {chunk_num + 1}/{total_chunks} chunks", end="")
-                    time.sleep(0.005)
 
-            print(f"\nFile '{filename}' sent successfully!")
+                    header = (
+                        f"FILE|{transfer_id}|{self.username}|{target_type}|"
+                        f"{target_name}|{filename}|{chunk_num}|{total_chunks}\n"
+                    ).encode("utf-8")
+
+                    packet = header + chunk
+                    self.udp_socket.sendto(packet, (recipient_ip, recipient_udp_port))
+                    print(f"\rSent {chunk_num + 1}/{total_chunks} chunks to {recipient_name}", end="")
+                    time.sleep(0.002)
+
+            print(f"\nFile '{filename}' sent to {recipient_name}")
             return True
 
         except Exception as e:
-            logger.error(f"Error sending file: {e}")
-            print(f"Failed to send file: {e}")
+            logger.error(f"Error sending file to {recipient_name}: {e}")
+            print(f"Failed to send file to {recipient_name}: {e}")
             return False
+        
+    def send_group_file(self, group_name: str, filepath: str) -> bool:
+        """
+        Sends a file to all online members of a group via UDP P2P.
+
+        Method first asks server for the members of the group,
+        then looks up the UDP endpoint for each online member, and finally
+        sends the file separately to each of those members.
+
+        Args:
+            group_name: Name of the target group
+            filepath: Path to the file to send
+
+        Returns:
+            True if sending completed for all reachable recipients,
+            False if there was a failure or no valid online targets
+        """
+        if not self._check_session():
+            print("Not logged in")
+            return False
+
+        if not os.path.exists(filepath):
+            print(f"File not found: {filepath}")
+            return False
+
+        if not self.udp_socket:
+            print("UDP not initialized — please login first")
+            return False
+
+        success, result = self.get_group_members(group_name)
+        if not success:
+            print(result)
+            return False
+
+        members = [m for m in result if m != self.username]
+        if not members:
+            print(f"No other members in group '{group_name}'")
+            return False
+
+        online_targets = []
+        for member in members:
+            user_info = self._get_user_info(member)
+            if user_info:
+                online_targets.append((member, user_info[0], user_info[1]))
+
+        if not online_targets:
+            print(f"No online members with UDP endpoints in '{group_name}'")
+            return False
+
+        print(f"Sending file to group '{group_name}' ({len(online_targets)} online members)")
+        overall_success = True
+
+        for member, ip, port in online_targets:
+            ok = self._send_file_to_endpoint(
+                recipient_name=member,
+                recipient_ip=ip,
+                recipient_udp_port=port,
+                filepath=filepath,
+                target_type="GROUP",
+                target_name=group_name
+            )
+            if not ok:
+                overall_success = False
+
+        return overall_success
+
 
     def _get_user_info(self, username: str) -> Optional[tuple]:
         """
@@ -322,33 +451,100 @@ class ChatClient:
             except ValueError:
                 return False, None, None
         return False, None, None
+    
+    def get_group_members(self, group_name: str) -> tuple:
+        """
+        Requests member list for a chat group from the server.
 
+        This is used before group UDP file transfer so sender can
+        determine which users should receive the file.
+
+        Args:
+            group_name: Name of the target group
+
+        Returns:
+            Tuple of (success, result), where result is either a list of
+            usernames if successful or an error message if unsuccessful
+        """
+        if not self._check_session():
+            return False, "Not logged in"
+
+        message = Message(
+            category=MessageCategory.CMND,
+            type=MessageType.GET_GROUP_MEMBERS
+        )
+        message.set_header('Session', self.session_token)
+        message.set_header('Group-Name', group_name)
+
+        response = self.send_message(message)
+
+        if not response:
+            return False, "Server not responding"
+
+        if response.type == MessageType.OK:
+            members_str = response.get_header('Members', '')
+            members = members_str.split(',') if members_str else []
+            return True, members
+        else:
+            reason = response.get_header('Reason', 'Failed to get group members')
+            return False, reason
+        
     def send_message(self, message: Message) -> Optional[Message]:
         """
-        Send a message and wait for response.
+        Sends message and waits for its matching response.
 
-        If the background listener thread is active, responses arrive via
-        response_queue (avoiding a race between the listener and this call).
-        Before the listener starts (pre-login), we read the response directly.
+        Method attaches unique message ID to each outgoing command.
+        When the listener thread is active, it waits until a CTRL response
+        with the matching In-Reply-To value is received. It avoids mixing
+        unrelated control replies in the shared response queue.
+
+        Args:
+            message: Message to send
+
+        Returns:
+            Matching response message, or None if sending fails or times out
         """
         if not self.socket:
             logger.error("Not connected to server")
             return None
 
         try:
-            self.protocol.send_message(self.socket, message)
+            msg_id = str(uuid.uuid4())
+            message.set_header("Msg-Id", msg_id)
 
-            if self.running:
-                # Listener thread is active — wait on the queue
-                import queue as _queue
-                try:
-                    return self.response_queue.get(timeout=5.0)
-                except _queue.Empty:
+            with self.command_lock:
+                self.protocol.send_message(self.socket, message)
+
+                if self.running:
+                    import queue as _queue
+                    deadline = time.time() + 5.0
+                    deferred = []
+
+                    while time.time() < deadline:
+                        remaining = max(0.0, deadline - time.time())
+                        try:
+                            response = self.response_queue.get(timeout=remaining)
+                        except _queue.Empty:
+                            logger.error("Request timed out")
+                            for item in deferred:
+                                self.response_queue.put(item)
+                            return None
+
+                        in_reply_to = response.get_header("In-Reply-To")
+                        if in_reply_to == msg_id:
+                            for item in deferred:
+                                self.response_queue.put(item)
+                            return response
+                        else:
+                            deferred.append(response)
+
                     logger.error("Request timed out")
+                    for item in deferred:
+                        self.response_queue.put(item)
                     return None
-            else:
-                # No listener yet — read directly from socket
-                return self.protocol.receive_message_buffered(self.socket)
+
+                else:
+                    return self.protocol.receive_message_buffered(self.socket)
 
         except socket.timeout:
             logger.error("Request timed out")
@@ -356,10 +552,11 @@ class ChatClient:
         except Exception as e:
             logger.error(f"Error sending message: {e}")
             return None
+        
 
     def register(self, username: str, password: str) -> tuple:
         """
-        Register a new user account.
+        Registers new user account.
 
         Args:
             username: Desired username
@@ -388,7 +585,7 @@ class ChatClient:
 
     def login(self, username: str, password: str) -> tuple:
         """
-        Login to the server.
+        Login to server.
 
         Args:
             username: Username
@@ -444,6 +641,7 @@ class ChatClient:
 
         self.session_token = None
         self.username = None
+        self.running = False
 
         if response and response.type == MessageType.OK:
             return True
@@ -452,7 +650,7 @@ class ChatClient:
 
     def create_group(self, group_name: str) -> tuple:
         """
-        Create a new chat group.
+        Create new chat group.
 
         Args:
             group_name: Name for the new group
@@ -483,7 +681,7 @@ class ChatClient:
 
     def join_group(self, group_name: str) -> tuple:
         """
-        Join an existing chat group.
+        Join existing group chat.
 
         Args:
             group_name: Name of the group to join
@@ -514,10 +712,10 @@ class ChatClient:
 
     def leave_group(self, group_name: str) -> tuple:
         """
-        Leave a chat group.
+        Leave group chat.
 
         Args:
-            group_name: Name of the group to leave
+            group_name: Name of group to leave
 
         Returns:
             Tuple of (success, message)
@@ -545,7 +743,7 @@ class ChatClient:
 
     def send_text(self, recipient: str, text: str) -> tuple:
         """
-        Send a text message to a user.
+        Send text message to a user.
 
         Args:
             recipient: Recipient username
@@ -578,7 +776,7 @@ class ChatClient:
 
     def send_group_text(self, group_name: str, text: str) -> tuple:
         """
-        Send a text message to a group.
+        Send text message to a group.
 
         Args:
             group_name: Group name
@@ -611,7 +809,7 @@ class ChatClient:
 
     def list_groups(self) -> tuple:
         """
-        List all available groups.
+        List all groups.
 
         Returns:
             Tuple of (success, groups_list_or_error_message)
@@ -666,6 +864,40 @@ class ChatClient:
         else:
             reason = response.get_header('Reason', 'Failed to list users')
             return False, reason
+        
+    def list_group_members(self, group_name: str) -> tuple:
+        """
+        Lists members of a specific group.
+
+        Args:
+            group_name: Name of the target group
+
+        Returns:
+            Tuple of (success, members_list_or_error_message)
+        """
+        if not self._check_session():
+            return False, "Not logged in"
+
+        message = Message(
+            category=MessageCategory.CMND,
+            type=MessageType.LIST_GROUP_MEMBERS
+        )
+        message.set_header('Session', self.session_token)
+        message.set_header('Group-Name', group_name)
+
+        response = self.send_message(message)
+
+        if not response:
+            return False, "Server not responding"
+
+        if response.type == MessageType.OK:
+            members_str = response.get_header('Members', '')
+            members = members_str.split(',') if members_str else []
+            return True, members
+        else:
+            reason = response.get_header('Reason', 'Failed to list group members')
+            return False, reason
+
 
     def _check_session(self) -> bool:
         """
@@ -675,12 +907,13 @@ class ChatClient:
             True if session is active
         """
         return bool(self.session_token)
+        
 
     # ==================== Incoming Message Handling ====================
 
     def start_listening(self) -> None:
         """
-        Start listening for incoming messages in a separate thread.
+        Starts listening for incoming messages in a separate thread.
         """
         self.running = True
 
@@ -691,7 +924,7 @@ class ChatClient:
         """
         Listen for incoming messages from the server.
 
-        This runs in a separate daemon thread.
+        Runs in a separate daemon thread.
         """
         while self.running and self.socket:
             try:
@@ -700,11 +933,12 @@ class ChatClient:
 
                 try:
                     message = self.protocol.receive_message_buffered(self.socket)
-                    # CTRL messages are responses to commands — route to queue
-                    if message.category == MessageCategory.CTRL:
+                    # Queue only command replies that reference a request
+                    if message.category == MessageCategory.CTRL and message.get_header("In-Reply-To"):
                         self.response_queue.put(message)
                     else:
                         self._handle_incoming_message(message)
+
                 except socket.timeout:
                     continue
 
@@ -717,7 +951,7 @@ class ChatClient:
 
     def _handle_incoming_message(self, message: Message) -> None:
         """
-        Handle an incoming message from the server.
+        Handles incoming message from server.
 
         Args:
             message: Received message
@@ -736,7 +970,7 @@ class ChatClient:
 
                 print("> ", end="", flush=True)
 
-        elif message.category == MessageCategory.CTRL:
+        elif message.category == MessageCategory.CTRL:#only unsolicited CTRL messages should reach here
             if message.type == MessageType.ERROR:
                 code = message.get_header('Code')
                 reason = message.get_header('Reason')
@@ -753,19 +987,21 @@ class ChatClient:
         print("Welcome to Chat Client")
         print("=" * 50)
         print("Commands:")
-        print("  register <username> <password>  - Register new account")
-        print("  login <username> <password>     - Login to server")
-        print("  logout                          - Logout from server")
-        print("  create-group <name>             - Create a new group")
-        print("  join-group <name>               - Join an existing group")
-        print("  leave-group <name>              - Leave a group")
-        print("  msg <user> <message>           - Send private message")
-        print("  group-msg <group> <message>    - Send group message")
-        print("  send-file <user> <filepath>     - Send file to user via UDP")
-        print("  list-users                      - List all users")
-        print("  list-groups                     - List all groups")
-        print("  help                            - Show this help")
-        print("  quit                            - Exit client")
+        print("  register <username> <password>     - Register new account")
+        print("  login <username> <password>        - Login to server")
+        print("  logout                             - Logout from server")
+        print("  create-group <name>                - Create a new group")
+        print("  join-group <name>                  - Join an existing group")
+        print("  leave-group <name>                 - Leave a group")
+        print("  msg <user> <message>               - Send private message")
+        print("  group-msg <group> <message>        - Send group message")
+        print("  send-file <user> <filepath>        - Send file to user via UDP")
+        print("  send-group-file <group> <filepath> - Send file to all online group members via UDP")
+        print("  list-users                         - List all users")
+        print("  list-groups                        - List all groups")
+        print("  list-group-members <group>         - List all members of a specific group")
+        print("  help                               - Show this help")
+        print("  quit                               - Exit client")
         print("=" * 50)
 
         while True:
@@ -775,7 +1011,7 @@ class ChatClient:
                 if not command:
                     continue
 
-                # Parse command
+                # Split commands safely
                 try:
                     parts = shlex.split(command)
                 except ValueError:
@@ -866,6 +1102,14 @@ class ChatClient:
                         filepath = ' '.join(parts[2:])
                         self.send_file(recipient, filepath)
 
+                elif cmd == "send-group-file":
+                    if len(parts) < 3:
+                        print("Usage: send-group-file <group> <filepath>")
+                    else:
+                        group_name = parts[1]
+                        filepath = ' '.join(parts[2:])
+                        self.send_group_file(group_name, filepath)
+
                 elif cmd == "list-users":
                     success, result = self.list_users()
                     if success:
@@ -884,21 +1128,35 @@ class ChatClient:
                     else:
                         print(result)
 
+                elif cmd == "list-group-members":
+                    if len(parts) != 2:
+                        print("Usage: list-group-members <group>")
+                    else:
+                        success, result = self.list_group_members(parts[1])
+                        if success:
+                            print(f"Members of '{parts[1]}':")
+                            for member in result:
+                                print(f"  - {member}")
+                        else:
+                            print(result)
+
                 elif cmd == "help":
                     print("Commands:")
-                    print("  register <username> <password>  - Register new account")
-                    print("  login <username> <password>     - Login to server")
-                    print("  logout                          - Logout from server")
-                    print("  create-group <name>             - Create a new group")
-                    print("  join-group <name>              - Join an existing group")
-                    print("  leave-group <name>             - Leave a group")
-                    print("  msg <user> <message>           - Send private message")
-                    print("  group-msg <group> <message>    - Send group message")
-                    print("  send-file <user> <filepath>    - Send file to user via UDP")
-                    print("  list-users                     - List all users")
-                    print("  list-groups                    - List all groups")
-                    print("  help                           - Show this help")
-                    print("  quit                           - Exit client")
+                    print("  register <username> <password>     - Register new account")
+                    print("  login <username> <password>        - Login to server")
+                    print("  logout                             - Logout from server")
+                    print("  create-group <name>                - Create a new group")
+                    print("  join-group <name>                  - Join an existing group")
+                    print("  leave-group <name>                 - Leave a group")
+                    print("  msg <user> <message>               - Send private message")
+                    print("  group-msg <group> <message>        - Send group message")
+                    print("  send-file <user> <filepath>        - Send file to user via UDP")
+                    print("  send-group-file <group> <filepath> - Send file to all online group members via UDP")
+                    print("  list-users                         - List all users")
+                    print("  list-groups                        - List all groups")
+                    print("  list-group-members <group>         - List all members of a specific group")
+                    print("  help                               - Show this help")
+                    print("  quit                               - Exit client")
 
                 elif cmd in ["quit", "exit"]:
                     print("Goodbye!")
@@ -916,7 +1174,7 @@ class ChatClient:
             except Exception as e:
                 print(f"Error: {e}")
 
-        # Clean up
+        # Clean up before exiting
         self.running = False
         if self.session_token:
             self.logout()

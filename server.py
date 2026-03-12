@@ -3,12 +3,12 @@
 Chat Server module for the chat application.
 
 This module implements the TCP server that handles client connections,
-user authentication, message routing (one-to-one and group chat), and
-group management. It uses SQLite for data persistence and supports
-concurrent clients using threads.
+user authentication, message routing (one-to-one and group chat), and group management 
+and supports for UDP one-to-one and group file transfer coordination. 
+It uses SQLite for data persistence and supports concurrent clients using threads.
 
-Author: MiniMax Agent
-Date: 2026-03-03
+Author: Group 68 (Anson Vattakunnel, Daniel Yu, Reece Baker)
+Date: 13/03/26
 """
 
 import socket
@@ -56,14 +56,14 @@ class ChatServer:
     """
 
     # Server configuration
-    HOST = '0.0.0.0'  # Listen on all interfaces
-    PORT = 8888       # Default TCP port
-    MAX_CLIENTS = 100  # Maximum concurrent clients
-    SESSION_TIMEOUT = 60  # Session timeout in seconds
+    HOST = '0.0.0.0'    # Listen on all interfaces
+    PORT = 8888 # Default TCP port
+    MAX_CLIENTS = 100   # Maximum concurrent clients
+    SESSION_TIMEOUT = 600   # Session timeout in 600 seconds/10 min
 
     def __init__(self, host: str = None, port: int = None):
         """
-        Initialize the chat server.
+        Initialize chat server.
 
         Args:
             host: Server host address (default: 0.0.0.0)
@@ -223,9 +223,9 @@ class ChatServer:
     def _handle_client(self, client_socket: socket.socket,
                       client_address: tuple) -> None:
         """
-        Handle a client connection.
+        Handles client connection.
 
-        This method runs in a separate thread for each client. It reads
+        The method runs in a separate thread for each client. It reads
         messages from the client, processes them, and sends responses.
 
         Args:
@@ -261,7 +261,7 @@ class ChatServer:
                             response and response.type == MessageType.OK):
                         current_session = None
 
-                    # Send response if there's one
+                    # Send response if there  is one
                     if response:
                         protocol.send_message(client_socket, response)
 
@@ -272,9 +272,11 @@ class ChatServer:
 
                 except ProtocolError as e:
                     logger.warning(f"Protocol error from {client_address}: {e}")
-                    error_response = MessageEncoder.encode_error(
-                        ErrorCode(e.code), e.message
-                    )
+                    try:
+                        code = ErrorCode(e.code)
+                    except ValueError:
+                        code = ErrorCode.BAD_REQUEST
+                    error_response = MessageEncoder.encode_error(code, e.message)
                     client_socket.sendall(error_response)
 
                 except socket.timeout:
@@ -394,6 +396,10 @@ class ChatServer:
             return self._handle_list_users(current_session, msg_id)
         elif msg_type == MessageType.GET_USER_INFO:
             return self._handle_get_user_info(message, current_session, msg_id)
+        elif msg_type == MessageType.LIST_GROUP_MEMBERS:
+            return self._handle_list_group_members(message, current_session, msg_id)
+        elif msg_type == MessageType.GET_GROUP_MEMBERS:
+            return self._handle_get_group_members(message, current_session, msg_id)
         else:
             return self._create_error_response(
                 ErrorCode.BAD_REQUEST, f"Unknown command: {msg_type.value}", msg_id
@@ -470,7 +476,7 @@ class ChatServer:
             )
 
     def _handle_login(self, message: Message, client_socket: socket.socket,
-                     client_address: tuple, msg_id: str) -> Message:
+                    client_address: tuple, msg_id: str) -> Message:
         """
         Handle user login.
 
@@ -508,8 +514,24 @@ class ChatServer:
                 ErrorCode.UNAUTHORIZED, msg, msg_id
             )
 
-        # Create session
         ip_address = client_address[0]
+
+        # Remove existing login for this username if present
+        with self.lock:
+            if username in self.active_clients:
+                old_sock, old_session = self.active_clients[username]
+                try:
+                    old_sock.close()
+                except Exception:
+                    pass
+
+                if old_session.token in self.active_sessions:
+                    del self.active_sessions[old_session.token]
+
+                self.db.delete_session(old_session.token)
+                del self.active_clients[username]
+
+        # Create new session after old one is removed
         session = self.db.create_session(user_id, ip_address, udp_port)
 
         # Register active session and client
@@ -844,6 +866,51 @@ class ChatServer:
             extra_headers={'Users': user_list}
         )
 
+    def _handle_list_group_members(self, message: Message, current_session: Session,
+                              msg_id: str) -> Message:
+        """
+        Handles listing members of a specific group.
+
+        Expected headers:
+            Group-Name: Name of the target group
+
+        Args:
+            message: Incoming command message
+            current_session: Current authenticated session
+            msg_id: Message ID
+
+        Returns:
+            OK response with Members header if successful,
+            otherwise an ERROR response
+        """
+        group_name = message.get_header('Group-Name')
+
+        if not group_name:
+            return self._create_error_response(
+                ErrorCode.BAD_REQUEST, "Missing group name", msg_id
+            )
+
+        group = self.db.get_group_by_name(group_name)
+        if not group:
+            return self._create_error_response(
+                ErrorCode.NOT_FOUND, "Group not found", msg_id
+            )
+
+        """#only members can view members
+        if not self.db.is_member(group_name, current_session.user_id):
+            return self._create_error_response(
+                ErrorCode.FORBIDDEN, "Not a member of this group", msg_id
+            )
+        """
+
+        members = self.db.get_group_members(group_name)
+        members_str = ",".join(members)
+
+        return self._create_ok_response(
+            msg_id,
+            extra_headers={'Members': members_str}
+        )
+
     def _handle_get_user_info(self, message: Message, current_session: Session,
                              msg_id: str) -> Message:
         """
@@ -874,6 +941,54 @@ class ChatServer:
         return self._create_error_response(
             ErrorCode.NOT_FOUND, f"User '{username}' not found or not online", msg_id
         )
+    
+
+    def _handle_get_group_members(self, message: Message, current_session: Session,
+                                msg_id: str) -> Message:
+        """
+        Return the usernames of all members in a group.
+
+        Used by client before sending a group UDP file so it can
+        discover which users belong to the target group.
+
+        Expected headers:
+            Group-Name: Name of the group
+
+        Args:
+            message: Incoming command message
+            current_session: Authenticated session of the requesting user
+            msg_id: Message ID used for the response
+
+        Returns:
+            OK response with a Members header containing a comma-separated
+            list of usernames, or an ERROR response if group not found.
+        """
+        group_name = message.get_header('Group-Name')
+
+        if not group_name:
+            return self._create_error_response(
+                ErrorCode.BAD_REQUEST, "Missing group name", msg_id
+            )
+
+        group = self.db.get_group_by_name(group_name)
+        if not group:
+            return self._create_error_response(
+                ErrorCode.NOT_FOUND, "Group not found", msg_id
+            )
+
+        if not self.db.is_member(group_name, current_session.user_id):
+            return self._create_error_response(
+                ErrorCode.FORBIDDEN, "Not a member of this group", msg_id
+            )
+
+        members = self.db.get_group_members(group_name)
+        members_str = ",".join(members)
+
+        return self._create_ok_response(
+            msg_id,
+            extra_headers={'Members': members_str}
+        )
+
 
     # ==================== Message Forwarding ====================
 

@@ -5,8 +5,8 @@ This module provides SQLite database management for users, sessions, groups,
 and message history. It uses context managers for safe database connections
 and provides thread-safe operations.
 
-Author: MiniMax Agent
-Date: 2026-03-03
+Author: Group 68 (Anson Vattakunnel, Daniel Yu, Reece Baker)
+Date: 13/03/26
 """
 
 import sqlite3
@@ -22,9 +22,9 @@ from models import User, Session, Group, ChatMessage, generate_session_token
 
 class Database:
     """
-    SQLite database manager for the chat application.
+    SQLite database manager for chat application.
 
-    This class handles all database operations including user authentication,
+    The class handles all database operations including user authentication,
     session management, group operations, and message history. It provides
     thread-safe operations using locks and context managers for safe connections.
 
@@ -35,7 +35,7 @@ class Database:
 
     def __init__(self, db_path: str = "chat.db"):
         """
-        Initialize the database connection.
+        Initializes database connection.
 
         Args:
             db_path: Path to the SQLite database file
@@ -171,8 +171,8 @@ class Database:
         Returns:
             Hashed password with salt
         """
-        # Use a simple salt based on the password itself for demo
-        # In production, use a proper salt from os.urandom()
+        # Use simple salt based on the password itself for demo
+        # *In production, use proper salt from os.urandom()
         salt = "chat_app_salt_2026"
         return hashlib.sha256((salt + password).encode()).hexdigest()
 
@@ -208,7 +208,7 @@ class Database:
 
     def authenticate_user(self, username: str, password: str) -> Tuple[bool, Optional[int], str]:
         """
-        Authenticate a user with username and password.
+        Authenticate user with username and password.
 
         Args:
             username: Username
@@ -323,7 +323,7 @@ class Database:
 
     def create_session(self, user_id: int, ip_address: str, udp_port: Optional[int] = None) -> Session:
         """
-        Create a new session for authenticated user.
+        Create new session for authenticated user.
 
         Args:
             user_id: User ID
@@ -341,8 +341,8 @@ class Database:
                     "INSERT INTO sessions (token, user_id, ip_address, udp_port) VALUES (?, ?, ?, ?)",
                     (token, user_id, ip_address, udp_port)
                 )
-                # Fetch username using the same connection to avoid re-acquiring
-                # self.lock (which is non-reentrant and would deadlock).
+                # Fetch username using same connection to avoid re-acquiring
+                # self.lock (non-reentrant and would deadlock).
                 cursor.execute("SELECT username FROM users WHERE id = ?", (user_id,))
                 user_row = cursor.fetchone()
                 username = user_row['username'] if user_row else "unknown"
@@ -386,7 +386,7 @@ class Database:
                         udp_port=row['udp_port'],
                         last_active=datetime.fromisoformat(row['last_active'])
                     )
-                    # Check if session is expired. Delete inline using the
+                    # Check if session expired. Delete inline using
                     # existing connection to avoid re-acquiring self.lock
                     # (non-reentrant) which would deadlock.
                     if session.is_expired():
@@ -459,11 +459,11 @@ class Database:
                 conn.commit()
                 return deleted
 
-    # ==================== Group Operations ====================
+    # ==================== Group Operations =====================
 
     def create_group(self, name: str, owner_id: int) -> Tuple[bool, str, Optional[int]]:
         """
-        Create a new chat group.
+        Create new chat group.
 
         Args:
             name: Group name
@@ -613,7 +613,7 @@ class Database:
 
     def leave_group(self, group_name: str, user_id: int) -> Tuple[bool, str]:
         """
-        Remove user from a group.
+        User leaves a group.
 
         Args:
             group_name: Group name
@@ -636,7 +636,7 @@ class Database:
 
                 # Check if owner tries to leave
                 if group_row['owner_id'] == user_id:
-                    # Delete the group entirely
+                    # Deletes group entirely
                     cursor.execute("DELETE FROM group_members WHERE group_id = ?", (group_id,))
                     cursor.execute("DELETE FROM groups WHERE id = ?", (group_id,))
                     conn.commit()
@@ -677,7 +677,7 @@ class Database:
 
     def get_group_members(self, group_name: str) -> List[str]:
         """
-        Get list of usernames in a group.
+        Get list of usernames in the group.
 
         Args:
             group_name: Group name
